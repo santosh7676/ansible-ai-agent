@@ -12,29 +12,6 @@ No manual playbook writing. No pre-configured environments. Everything happens l
 
 ---
 
-## Demo Flow
-User types a plain English task
-↓
-Agent detects number of target servers
-↓
-Selects available ports dynamically (SSH + HTTP)
-↓
-Provisions fresh Docker containers
-↓
-Waits for SSH on all containers
-↓
-Generates dynamic Ansible inventory
-↓
-Calls OpenRouter API (DeepSeek) to generate playbook
-↓
-Executes playbook against all containers live
-↓
-Verifies HTTP response on each container
-↓
-Prints access URLs for immediate validation
-
----
-
 ## Example Prompts
 Install and start nginx on the target server
 Install and start apache on 3 servers, deploy default hello world page
@@ -42,18 +19,20 @@ Install and start nginx on 2 servers, deploy default page with content "This is 
 
 ---
 
-## Architecture
+## Project Structure
+
 ansible-ai-agent/
-├── agent.py              # Main agent controller
-├── prompt_template.py    # Prompt engineering for AI playbook generation
-├── executor.py           # Shell command runner + live log streaming
-├── inventory.ini         # Dynamically generated Ansible inventory
-├── Dockerfile            # Ubuntu 22.04 + SSH target container
-├── requirements.txt      # Python dependencies
-├── .env.example          # API key template
-├── .gitignore            # Excludes .env, output/
+│
+├── agent.py                  Main agent controller
+├── prompt_template.py        Prompt engineering for AI playbook generation
+├── executor.py               Shell command runner and live log streaming
+├── inventory.ini             Dynamically generated Ansible inventory
+├── Dockerfile                Ubuntu 22.04 SSH target container
+├── requirements.txt          Python dependencies
+├── .env.example              API key template
+├── .gitignore                Excludes .env and output folder
 └── output/
-└── playbook.yml      # AI-generated playbook (git ignored)
+└── playbook.yml              AI-generated playbook (git ignored)
 
 ---
 
