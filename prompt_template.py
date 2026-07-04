@@ -23,6 +23,8 @@ Rules:
 14. Always use ansible_facts['os_family'] instead of ansible_os_family in when conditions
 15. Handlers must NEVER contain when conditions or any conditionals
 16. Handlers should only contain the service action, nothing else
+17. For nginx on Ubuntu/Debian, always use /var/www/html/index.html as the web root
+18. For apache2 on Ubuntu/Debian, always use /var/www/html/index.html as the web root
 
 Return only the playbook YAML starting with ---
 """

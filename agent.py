@@ -5,12 +5,13 @@ import time
 import requests
 from rich.console import Console
 from rich.panel import Panel
-from rich import print as rprint
+from rich.rule import Rule
+from rich.syntax import Syntax
+from rich.table import Table
 from dotenv import load_dotenv
 from prompt_template import generate_playbook_prompt, generate_server_count_prompt
 from executor import run_command, wait_for_ssh
 
-# Load environment variables
 load_dotenv()
 
 console = Console()
@@ -21,11 +22,27 @@ MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3-0324")
 PLAYBOOK_PATH = "output/playbook.yml"
 INVENTORY_PATH = "inventory.ini"
 
-# Port ranges
 SSH_PORT_START = 2222
 SSH_PORT_END = 2230
 HTTP_PORT_START = 8080
 HTTP_PORT_END = 8090
+
+
+def step_header(number: int, title: str, start_time: float) -> float:
+    """Print a clean step header and return new start time."""
+    elapsed = time.time() - start_time
+    console.print()
+    console.print(Rule(
+        f"[bold cyan]Step {number}: {title}[/bold cyan]",
+        style="cyan"
+    ))
+    return time.time()
+
+
+def step_done(start_time: float) -> None:
+    """Print step completion time."""
+    elapsed = time.time() - start_time
+    console.print(f"  [dim]✓ Done in {elapsed:.1f}s[/dim]")
 
 
 def call_openrouter(prompt: str) -> str:
@@ -39,7 +56,7 @@ def call_openrouter(prompt: str) -> str:
     }
     response = requests.post(OPENROUTER_URL, headers=headers, json=payload)
     if response.status_code != 200:
-        console.print(f"[red]OpenRouter API error: {response.status_code} - {response.text}[/red]")
+        console.print(f"[red]OpenRouter API error: {response.status_code}[/red]")
         sys.exit(1)
     return response.json()["choices"][0]["message"]["content"].strip()
 
@@ -72,24 +89,33 @@ def get_available_ports(start: int, end: int, count: int) -> list:
 
 
 def remove_existing_containers() -> None:
+    console.print("  [dim]Removing existing containers...[/dim]")
     for i in range(1, SSH_PORT_END - SSH_PORT_START + 2):
-        run_command(f"docker rm -f ansible-target-{i} 2>/dev/null || true", stream=False)
+        run_command(
+            f"docker rm -f ansible-target-{i} 2>/dev/null || true",
+            stream=False
+        )
 
+    # Clean only our port range entries from known_hosts
+    console.print(f"  [dim]Cleaning SSH known hosts for port range {SSH_PORT_START}-{SSH_PORT_END}...[/dim]")
+    for port in range(SSH_PORT_START, SSH_PORT_END + 1):
+        run_command(
+            f"ssh-keygen -R '[127.0.0.1]:{port}' 2>/dev/null || true",
+            stream=False
+        )
+    console.print("  [green]Clean slate ready[/green]")
 
 def provision_containers(count: int, ssh_ports: list, http_ports: list) -> list:
-    """
-    Spin up fresh containers with SSH and HTTP ports exposed.
-    Returns list of (container_name, ssh_port, http_port) tuples.
-    """
     containers = []
     for i, (ssh_port, http_port) in enumerate(zip(ssh_ports, http_ports), start=1):
         name = f"ansible-target-{i}"
         cmd = f"docker run -d --name {name} -p {ssh_port}:22 -p {http_port}:80 ansible-target"
-        console.print(f"\n[bold cyan]Provisioning container {i}/{count}: {name} (SSH:{ssh_port}, HTTP:{http_port})[/bold cyan]")
-        exit_code, output = run_command(cmd)
+        console.print(f"  [cyan]Provisioning {name} — SSH:{ssh_port} HTTP:{http_port}[/cyan]")
+        exit_code, output = run_command(cmd, stream=False)
         if exit_code != 0:
-            console.print(f"[red]Failed to provision {name}[/red]")
+            console.print(f"  [red]Failed to provision {name}[/red]")
             sys.exit(1)
+        console.print(f"  [green]✔ {name} is up[/green]")
         containers.append((name, ssh_port, http_port))
     return containers
 
@@ -105,9 +131,13 @@ def generate_inventory(containers: list) -> None:
     with open(INVENTORY_PATH, "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    console.print(f"\n[green]Inventory generated with {len(containers)} host(s):[/green]")
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Container")
+    table.add_column("SSH Port")
+    table.add_column("HTTP Port")
     for name, ssh_port, http_port in containers:
-        console.print(f"  [dim]{name} → SSH:{ssh_port} HTTP:{http_port}[/dim]")
+        table.add_row(name, str(ssh_port), str(http_port))
+    console.print(table)
 
 
 def save_playbook(content: str) -> None:
@@ -116,98 +146,126 @@ def save_playbook(content: str) -> None:
         f.write(content)
 
 
+def display_playbook(content: str) -> None:
+    syntax = Syntax(content, "yaml", theme="monokai", line_numbers=True)
+    console.print(syntax)
+
+
 def verify_services(containers: list) -> None:
-    console.print("\n[bold cyan]Verifying services on all containers...[/bold cyan]")
+    console.print()
+    console.print(Rule("[bold green]Verification[/bold green]", style="green"))
+    all_ok = True
     for name, ssh_port, http_port in containers:
-        # Verify via docker exec (internal port 80)
         exit_code, output = run_command(
             f"docker exec {name} curl -s -o /dev/null -w '%{{http_code}}' http://localhost:80",
             stream=False
         )
         if "200" in output:
-            console.print(f"[green]{name} → HTTP 200 ✅  (curl http://127.0.0.1:{http_port} from host)[/green]")
+            console.print(f"  [green]✔ {name} → HTTP 200  →  curl http://127.0.0.1:{http_port}[/green]")
         else:
-            console.print(f"[yellow]{name} → service not responding yet ⚠️[/yellow]")
+            console.print(f"  [yellow]⚠ {name} → not responding yet[/yellow]")
+            all_ok = False
+    return all_ok
 
 
 def main():
+    total_start = time.time()
+
+    console.print()
     console.print(Panel.fit(
         "[bold green]Ansible AI Agent[/bold green]\n"
-        "[dim]From Prompt to Production[/dim]",
+        "[dim]From Prompt to Production[/dim]\n"
+        f"[dim]Model: {MODEL}[/dim]",
         border_style="green"
     ))
 
-    # Step 1 - Get user input
     console.print("\n[bold white]Enter your infrastructure task:[/bold white]")
-    user_input = input("> ").strip()
+    user_input = input("  > ").strip()
 
     if not user_input:
         console.print("[red]No input provided. Exiting.[/red]")
         sys.exit(1)
 
-    # Step 2 - Parse server count
-    console.print("\n[bold cyan]Step 1: Detecting number of target servers...[/bold cyan]")
+    # Step 1 - Detect server count
+    t = step_header(1, "Detecting target servers", total_start)
     server_count = get_server_count(user_input)
-    console.print(f"[green]Target servers detected: {server_count}[/green]")
+    console.print(f"  [green]✔ Target servers: {server_count}[/green]")
+    step_done(t)
 
-    # Step 3 - Get available ports
-    console.print(f"\n[bold cyan]Step 2: Finding available ports...[/bold cyan]")
+    # Step 2 - Get available ports
+    t = step_header(2, "Selecting available ports", total_start)
     ssh_ports = get_available_ports(SSH_PORT_START, SSH_PORT_END, server_count)
     http_ports = get_available_ports(HTTP_PORT_START, HTTP_PORT_END, server_count)
-    console.print(f"[green]SSH ports  : {ssh_ports}[/green]")
-    console.print(f"[green]HTTP ports : {http_ports}[/green]")
+    console.print(f"  [green]✔ SSH ports  : {ssh_ports}[/green]")
+    console.print(f"  [green]✔ HTTP ports : {http_ports}[/green]")
+    step_done(t)
 
-    # Step 4 - Remove existing containers
-    console.print("\n[bold cyan]Step 3: Cleaning up existing containers...[/bold cyan]")
+    # Step 3 - Clean up
+    t = step_header(3, "Cleaning up existing containers", total_start)
     remove_existing_containers()
+    step_done(t)
 
-    # Step 5 - Provision containers
-    console.print(f"\n[bold cyan]Step 4: Provisioning {server_count} fresh container(s)...[/bold cyan]")
+    # Step 4 - Provision containers
+    t = step_header(4, f"Provisioning {server_count} container(s)", total_start)
     containers = provision_containers(server_count, ssh_ports, http_ports)
+    step_done(t)
 
-    # Step 6 - Wait for SSH
-    console.print("\n[bold cyan]Step 5: Waiting for SSH on all containers...[/bold cyan]")
+    # Step 5 - Wait for SSH
+    t = step_header(5, "Waiting for SSH on all containers", total_start)
     for name, ssh_port, http_port in containers:
-        console.print(f"\n[dim]Checking SSH on {name} (port {ssh_port})...[/dim]")
+        console.print(f"  [dim]Waiting for SSH on {name} (port {ssh_port})...[/dim]")
         if not wait_for_ssh(host="127.0.0.1", port=ssh_port):
-            console.print(f"[red]SSH not ready on {name}. Exiting.[/red]")
+            console.print(f"  [red]SSH not ready on {name}. Exiting.[/red]")
             sys.exit(1)
+        console.print(f"  [green]✔ {name} SSH ready[/green]")
+    step_done(t)
 
-    # Step 7 - Generate inventory
-    console.print("\n[bold cyan]Step 6: Generating dynamic inventory...[/bold cyan]")
+    # Step 6 - Generate inventory
+    t = step_header(6, "Generating dynamic inventory", total_start)
     generate_inventory(containers)
+    step_done(t)
 
-    # Step 8 - Generate playbook
-    console.print("\n[bold cyan]Step 7: Generating Ansible playbook...[/bold cyan]")
+    # Step 7 - Generate playbook
+    t = step_header(7, "Generating Ansible playbook via AI", total_start)
     playbook_content = call_openrouter(generate_playbook_prompt(user_input))
-    console.print(f"\n[bold green]Generated Playbook:[/bold green]")
-    console.print(f"[yellow]{playbook_content}[/yellow]")
     save_playbook(playbook_content)
-    console.print(f"\n[green]Playbook saved to {PLAYBOOK_PATH}[/green]")
+    console.print()
+    display_playbook(playbook_content)
+    step_done(t)
 
-    # Step 9 - Execute playbook
-    console.print("\n[bold cyan]Step 8: Executing playbook against all containers...[/bold cyan]")
+    # Step 8 - Execute playbook
+    t = step_header(8, "Executing playbook against all containers", total_start)
     ansible_command = (
+        f"ANSIBLE_DEPRECATION_WARNINGS=False "
+        f"ANSIBLE_INTERPRETER_PYTHON_FALLBACK=silent "
         f"ansible-playbook -i {INVENTORY_PATH} {PLAYBOOK_PATH} "
         f"--ssh-extra-args='-o StrictHostKeyChecking=no'"
     )
     exit_code, output = run_command(ansible_command)
+    step_done(t)
 
-    # Step 10 - Show result
+    # Final result
+    total_elapsed = time.time() - total_start
+    console.print()
+
     if exit_code == 0:
+        verify_services(containers)
+        console.print()
         console.print(Panel.fit(
-            "[bold green]SUCCESS[/bold green]\n"
-            f"All {server_count} server(s) provisioned and configured successfully!",
+            f"[bold green]SUCCESS[/bold green]\n"
+            f"All {server_count} server(s) provisioned and configured!\n"
+            f"[dim]Total time: {total_elapsed:.1f}s[/dim]",
             border_style="green"
         ))
-        verify_services(containers)
-        console.print("\n[bold white]Access your servers from the host:[/bold white]")
+        console.print()
+        console.print("[bold white]Access your servers:[/bold white]")
         for name, ssh_port, http_port in containers:
             console.print(f"  [cyan]curl http://127.0.0.1:{http_port}[/cyan]  ← {name}")
     else:
         console.print(Panel.fit(
-            "[bold red]FAILED[/bold red]\n"
-            "Something went wrong. Check the logs above.",
+            f"[bold red]FAILED[/bold red]\n"
+            "Check the logs above for details.\n"
+            f"[dim]Total time: {total_elapsed:.1f}s[/dim]",
             border_style="red"
         ))
 
